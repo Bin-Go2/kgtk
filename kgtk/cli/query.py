@@ -1,5 +1,5 @@
 """
-Test driver for KGTK Kypher query engine
+Run Kypher query engine.
 """
 
 import sys
@@ -7,6 +7,7 @@ import os
 import os.path
 import tempfile
 import io
+import argparse
 
 from kgtk.exceptions import KGTKException
 
@@ -16,20 +17,46 @@ DEFAULT_GRAPH_CACHE_FILE = os.path.join(
     tempfile.gettempdir(), 'kgtk-graph-cache-%s.sqlite3.db' % os.environ.get('USER', ''))
 
 def parser():
+    desc = ('Query one or more KGTK files with Kypher.\n' +
+            'IMPORTANT: input can come from stdin but chaining queries is not yet supported.')
     return {
-        'help': 'Query one or more KGTK files with Kypher',
-        'description': 'Query one or more KGTK files with Kypher.',
+        'help': desc,
+        'description': desc,
     }
 
 EXPLAIN_MODES = ('plan', 'full', 'expert')
 INDEX_MODES = ('auto', 'expert', 'quad', 'triple', 'node1+label', 'node1', 'label', 'node2', 'none')
 
+class InputOptionAction(argparse.Action):
+    """Special-purpose argparse action that associates an input-specific option
+    (such as an alias) to the most recently parsed input file.  NOTE: the 'dest'
+    value will be used as the key for the specific option in 'input_file_options'.
+    """
+    def __call__(self, parser, namespace, values, option_string=None):
+        input_options = getattr(namespace, 'input_file_options', {}) or {}
+        inputs = KGTKArgumentParser.get_input_file_list(getattr(namespace, 'input_files', []))
+        if len(inputs) < 1:
+            raise KGTKException('out-of-place input option: %s' % option_string)
+        # normalize path objects to strings:
+        input_file = str(inputs[-1])
+        # handle boolean args (also requires nargs=0):
+        if self.type == bool:
+            values = True
+        # we use self.dest as the key for this particular option:
+        input_options.setdefault(input_file, {})[self.dest] = values
+        setattr(namespace, 'input_file_options', input_options)
+
 def add_arguments_extended(parser: KGTKArgumentParser, parsed_shared_args):
     parser.accept_shared_argument('_debug')
     parser.accept_shared_argument('_expert')
 
-    parser.add_input_file(options=["-i", "--input-files"], dest='input_files', allow_list=True, default_stdin=False, allow_stdin=False,
-                        who="one or more named input files to query (maybe compressed)")
+    parser.add_input_file(options=["-i", "--input-files"], dest='input_files', allow_list=True, default_stdin=False, allow_stdin=True,
+                        who="One or more input files to query (maybe compressed).")
+    parser.add_argument('--as', metavar='NAME', default={}, action=InputOptionAction, dest='alias',
+                        help="alias name to be used for preceding input")
+    # future extension:
+    #parser.add_argument('--in-memory', default=False, type=bool, nargs=0, action=InputOptionAction, dest='in_memory',
+    #                    help="load the preceding input into a temporary in-memory table only")
     parser.add_argument('--query', default=None, action='store', dest='query',
                         help="complete Kypher query combining all clauses," +
                         " if supplied, all other specialized clause arguments will be ignored")
@@ -67,7 +94,7 @@ def add_arguments_extended(parser: KGTKArgumentParser, parsed_shared_args):
                         + " (defaults to per-user temporary file)")
     parser.add_argument('-o', '--out', default='-', action='store', dest='output',
                         help="output file to write to, if `-' (the default) output goes to stdout."
-                        + " Files with extensions .gz, .bz2 or .xz will be appopriately compressed.")
+                        + " Files with extensions .gz, .bz2 or .xz will be appropriately compressed.")
 
 def import_modules():
     """Import command-specific modules that are only needed when we actually run.
@@ -114,13 +141,11 @@ def run(input_files: KGTKFiles,
         if debug and expert:
             loglevel = 2
             print('OPTIONS:', options)
-            
-        # inputs = options.get('inputs') or []
-        inputs = KGTKArgumentParser.get_input_file_list(input_files)
+
+        # normalize path objects to strings:
+        inputs = [str(f) for f in KGTKArgumentParser.get_input_file_list(input_files)]
         if len(inputs) == 0:
-            raise KGTKException('At least one named input file needs to be supplied')
-        if '-' in inputs:
-            raise KGTKException('Cannot yet handle input from stdin')
+            raise KGTKException('At least one input needs to be supplied')
 
         output = options.get('output')
         if output == '-':
@@ -137,6 +162,7 @@ def run(input_files: KGTKFiles,
             store = sqlstore.SqliteStore(graph_cache, create=not os.path.exists(graph_cache), loglevel=loglevel)
         
             query = kyquery.KgtkQuery(inputs, store, loglevel=loglevel,
+                                      options=options.get('input_file_options'),
                                       query=options.get('query'),
                                       match=options.get('match'),
                                       where=options.get('where'),
@@ -155,11 +181,13 @@ def run(input_files: KGTKFiles,
                 result = query.execute()
                 # we are forcing \n line endings here instead of \r\n, since those
                 # can be re/imported efficiently with the new SQLite import command;
-                # we also specify `escapechar' now so any unexpected column or line
-                # separators in fields will be quoted and visible:
+                # we force `escapechar' back to None to avoid generation of double
+                # backslashes as in 'Buffalo \'66', which in turn will now raise errors
+                # if separators in fields are encountered (which seems what we want):
                 csvwriter = csv.writer(output, dialect=None, delimiter='\t',
                                        quoting=csv.QUOTE_NONE, quotechar=None,
-                                       lineterminator='\n', escapechar='\\')
+                                       lineterminator='\n',
+                                       escapechar=None)
                 if not options.get('no_header'):
                     csvwriter.writerow(query.result_header)
                 csvwriter.writerows(result)

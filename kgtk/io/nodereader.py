@@ -51,6 +51,10 @@ class NodeReader(KgtkReader):
         #    raise ValueError("open_node_file expected to produce a NodeReader")
         return typing.cast(NodeReader, result)
 
+    def _ignore_prohibited_lists(self, row: typing.List[str], line: str)->bool:
+        # TODO: Should we apply this to the `id` column of a node file for simplicity?
+        return False
+
     def _ignore_if_blank_required_fields(self, values: typing.List[str], line: str)->bool:
         # Ignore line_action with blank id fields.  This code comes after
         # filling missing trailing columns, although it could be reworked
@@ -98,7 +102,7 @@ def main():
     row: typing.List[str]
     for row in nr:
         line_count += 1
-    print("Read %d lines" % line_count)
+    print("Read %d lines" % line_count, file=error_file, flush=True)
 
 if __name__ == "__main__":
     main()
